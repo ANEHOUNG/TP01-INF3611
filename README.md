@@ -1,6 +1,5 @@
-# Create Users Automation - 3 méthodes d'automatisation
+# Creation automatique des utilisateurs sous linux
 
-Ce dépôt regroupe **3 approches différentes** pour automatiser la création massive d'utilisateurs sur un serveur Ubuntu, en respectant exactement les contraintes du sujet.
 
 ## Parties
 
