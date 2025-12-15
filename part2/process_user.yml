@@ -1,0 +1,96 @@
+---
+- name: Définir les variables utilisateur
+  set_fact:
+    username: "{{ user_fields[0] }}"
+    password: "{{ user_fields[1] }}"
+    full_name: "{{ user_fields[2] }}"
+    phone: "{{ user_fields[3] }}"
+    email: "{{ user_fields[4] }}"
+    requested_shell: "{{ user_fields[5] | default('/bin/bash') | trim }}"
+
+- name: Vérifier si l'utilisateur existe déjà
+  getent:
+    database: passwd
+    key: "{{ username }}"
+  failed_when: false
+  register: user_exists
+
+- name: Ignorer si déjà existant
+  when: user_exists.getent_passwd is defined
+  lineinfile:
+    path: "{{ log_file }}"
+    line: "Utilisateur {{ username }} déjà existant → ignoré"
+
+- name: Installer le shell demandé si nécessaire (zsh ou fish)
+  when:
+    - user_exists.getent_passwd is not defined
+    - requested_shell is regex('^(\/bin\/zsh|\/usr\/bin\/fish|\/bin\/fish)$')
+  apt:
+    name: "{{ 'zsh' if 'zsh' in requested_shell else 'fish' }}"
+    state: present
+    update_cache: yes
+
+- name: Déterminer le shell final (fallback /bin/bash)
+  set_fact:
+    final_shell: "/bin/bash"
+  when: >-
+    requested_shell not in ['/bin/bash', '/bin/zsh', '/usr/bin/fish', '/bin/fish']
+
+- name: Garder le shell demandé si valide
+  set_fact:
+    final_shell: "{{ requested_shell }}"
+  when: >-
+    requested_shell in ['/bin/bash', '/bin/zsh', '/usr/bin/fish', '/bin/fish'] and requested_shell is file
+
+- name: Créer l'utilisateur
+  when: user_exists.getent_passwd is not defined
+  user:
+    name: "{{ username }}"
+    password: "{{ password | password_hash('sha512') }}"
+    update_password: on_create
+    shell: "{{ final_shell }}"
+    comment: "{{ full_name }}|{{ phone }}|{{ email }}"
+    create_home: yes
+    groups: "{{ group_name }},sudo"
+    append: yes
+
+- name: Ajouter l'utilisateur aux groupes graphiques existants
+  when: user_exists.getent_passwd is not defined
+  command: usermod -aG {{ item }} {{ username }}
+  loop:
+    - video
+    - audio
+    - input
+    - render
+    - lightdm
+    - gdm
+    - sddm
+    - bluetooth
+    - plugdev
+  ignore_errors: yes   # Ignore les groupes qui n'existent pas
+
+- name: Forcer changement de mot de passe à la première connexion
+  when: user_exists.getent_passwd is not defined
+  command: chage -d 0 "{{ username }}"
+
+- name: Créer WELCOME.txt personnalisé
+  when: user_exists.getent_passwd is not defined
+  template:
+    src: welcome.txt.j2
+    dest: "/home/{{ username }}/WELCOME.txt"
+    owner: "{{ username }}"
+    group: "{{ username }}"
+    mode: '0644'
+
+- name: Ajouter affichage du message dans .bashrc
+  when: user_exists.getent_passwd is not defined
+  lineinfile:
+    path: "/home/{{ username }}/.bashrc"
+    line: "cat /home/{{ username }}/WELCOME.txt"
+    owner: "{{ username }}"
+    group: "{{ username }}"
+
+- name: Log création utilisateur
+  lineinfile:
+    path: "{{ log_file }}"
+    line: "Utilisateur {{ username }} créé (shell: {{ final_shell }})"

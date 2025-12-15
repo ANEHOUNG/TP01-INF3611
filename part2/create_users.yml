@@ -1,0 +1,165 @@
+---
+- name: Création massive d'utilisateurs avec contraintes et envoi d'email
+  hosts: all
+  become: yes
+
+  vars:
+    group_name: "{{ group_name_var }}"  # Passé en extra-vars : -e "group_name_var=students-inf-361"
+    users_file: /tmp/users.txt          # Chemin du fichier users.txt sur la cible
+    home_mount: /home                   # Point de montage pour les quotas disque (assumer /home sur ext4/xfs)
+    log_file: "/var/log/ansible_create_users_{{ ansible_date_time.iso8601 }}.log"
+
+  pre_tasks:
+    - name: Récupérer l'IP publique du serveur (via ipify)
+      community.general.ipify_facts:
+      delegate_to: localhost
+      become: no
+      run_once: true
+
+    - name: Récupérer le port SSH d'écoute
+      shell: grep '^Port ' /etc/ssh/sshd_config | awk '{print $2}' || echo 22
+      changed_when: false
+      register: ssh_port_reg
+
+    - name: Définir le port SSH
+      set_fact:
+        ssh_listen_port: "{{ ssh_port_reg.stdout | default('22') }}"
+
+    - name: Créer le fichier de log
+      copy:
+        content: "=== Début d'exécution Ansible : {{ ansible_date_time.iso8601 }} ===\nGroupe : {{ group_name }}\n"
+        dest: "{{ log_file }}"
+        mode: '0644'
+
+  tasks:
+    - name: Créer le groupe principal
+      group:
+        name: "{{ group_name }}"
+        state: present
+      register: group_created
+
+    - name: Log création du groupe
+      lineinfile:
+        path: "{{ log_file }}"
+        line: "Groupe {{ group_name }} {{ 'créé' if group_created.changed else 'déjà existant' }}"
+
+    - name: Copier users.txt sur le serveur
+      copy:
+        src: users.txt
+        dest: /tmp/users.txt
+        mode: '0644'
+
+    - name: Vérifier que users.txt existe sur le serveur
+      stat:
+        path: /tmp/users.txt
+      register: users_file_stat
+
+    - name: Lire le fichier users.txt
+      slurp:
+        src: /tmp/users.txt
+      register: users_content
+      when: users_file_stat.stat.exists
+
+    - name: Décoder et parser les lignes
+      set_fact:
+        users_list: "{{ (users_content.content | b64decode | split('\n')) | select | map('split', ';') | map('trim') | list }}"
+
+    - name: Traiter chaque utilisateur
+      include_tasks: process_user.yml
+      loop: "{{ users_list }}"
+      loop_control:
+        loop_var: user_fields
+        label: "{{ user_fields[0] }}"
+
+    - name: Calculer 20% de la RAM totale (en KB)
+      set_fact:
+        total_ram_kb: "{{ ansible_memtotal_mb * 1024 }}"
+        max_ram_kb: "{{ (ansible_memtotal_mb * 1024 * 0.2) | int }}"
+
+    - name: Limiter l'utilisation mémoire (20% RAM) pour le groupe
+      community.general.pam_limits:
+        domain: "@{{ group_name }}"
+        limit_type: "{{ item.type }}"
+        limit_item: as
+        value: "{{ max_ram_kb }}"
+      loop:
+        - { type: soft }
+        - { type: hard }
+
+    - name: Installer quota si nécessaire (pour ext4/XFS)
+      apt:
+        name: quota
+        state: present
+
+    - name: Limiter espace disque à 15 Go par utilisateur (quota user)
+      command: setquota -u {{ item[0] }} 15360 15360 0 0 / home
+      loop: "{{ users_list }}"
+      ignore_errors: yes #au cas ou quota n'est pas configurer
+
+    - name: Interdire la commande su pour le groupe (via PAM access)
+      block:
+        - name: Installer libpam-modules si nécessaire
+          apt:
+            name: libpam-modules
+            state: present
+
+        - name: Ajouter pam_access.so dans /etc/pam.d/su
+          lineinfile:
+            path: /etc/pam.d/su
+            insertafter: '^@include common-account'
+            line: "account required pam_access.so"
+
+        - name: Refuser su pour le groupe dans access.conf
+          lineinfile:
+            path: /etc/security/access.conf
+            line: "- : {{ group_name }} : ALL"
+
+    - name: Interdire su via sudoers (complément)
+      copy:
+        content: "%{{ group_name }} ALL=(ALL:ALL) ALL, !/bin/su, !/usr/bin/su"
+        dest: /etc/sudoers.d/no-su-for-group
+        mode: '0440'
+        validate: visudo -cf %s
+
+    - name: Envoyer email personnalisé à chaque utilisateur
+      loop: "{{ users_list }}"
+      loop_control:
+        loop_var: user_fields
+        label: "{{ user_fields[0] }}"
+      vars:
+        username: "{{ user_fields[0] }}"
+        password: "{{ user_fields[1] }}"
+        full_name: "{{ user_fields[2] }}"
+        email: "{{ user_fields[4] }}"
+      community.general.mail:
+        host: localhost          # Configurer postfix/sendmail sur le serveur pour envoi réel
+        port: 25
+        subject: "Bienvenue sur le serveur {{ ansible_hostname }} !"
+        to: "{{ full_name }} <{{ email }}>"
+        body: |
+          Bonjour {{ full_name }},
+
+          Votre compte a été créé avec succès.
+
+          Adresse IP du serveur : {{ ipify_public_ip }}
+          Port SSH : {{ ssh_listen_port }}
+          Nom d'utilisateur : {{ username }}
+          Mot de passe initial : {{ password }}
+
+          Commande SSH pour vous connecter :
+          ssh {{ username }}@{{ ipify_public_ip }} -p {{ ssh_listen_port }}
+
+          Commande pour transmettre votre clé publique SSH (depuis votre machine locale) :
+          - Linux/macOS : ssh-copy-id {{ username }}@{{ ipify_public_ip }} -p {{ ssh_listen_port }}
+          - Windows (PowerShell) : type $env:USERPROFILE\.ssh\id_rsa.pub | ssh {{ username }}@{{ ipify_public_ip }} -p {{ ssh_listen_port }} "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys"
+
+          Vous devrez changer votre mot de passe à la première connexion.
+
+          Cordialement,
+          L'administrateur système
+      delegate_to: localhost
+
+    - name: Log fin d'exécution
+      lineinfile:
+        path: "{{ log_file }}"
+        line: "=== Fin d'exécution : {{ ansible_date_time.iso8601 }} ==="
