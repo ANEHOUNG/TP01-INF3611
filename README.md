@@ -2,10 +2,10 @@
 
 
 ## Parties
-
-- **part1-bash** : Script Bash pur
-- **part2-ansible** : Playbook Ansible complet
-- **part3-terraform** : Infrastructure as Code avec Terraform exécutant le script Bash
+- **part0** : Procedure de modification du serveur ssh
+- **part1** : Script Bash 
+- **part2** : Ansible complet
+- **part3** : Terraform exécutant le script Bash
 
 Toutes les parties créent :
 - Un groupe passé en paramètre (ex: `students-inf-361`)
