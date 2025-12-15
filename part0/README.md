@@ -11,7 +11,7 @@ o	Ou démarrer une seconde instance test :
  	sudo /usr/sbin/sshd -f /etc/ssh/sshd_config -p 2222
 4.	Redémarrer ou recharger le service ssh :
  	sudo systemctl reload sshd    # conserve connexions
-# ou
+ ou
 sudo systemctl restart sshd   # arrête et relance
 5.	Vérifier l’état et les logs :
  	sudo systemctl status sshd
